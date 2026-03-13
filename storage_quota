@@ -1,0 +1,232 @@
+#!/bin/bash
+#----------------------------------------------------------------------------
+# bmrc_storage_quota — BMRC storage usage reporter
+#
+#   home              : du on $HOME vs 10 GiB policy limit
+#   /well/<group>     : df, auto-detected; works on GPFS and Lustre
+#   /well/kir/scratch : df, shared scratch
+#
+# Usage: bmrc_storage_quota [-h] [-u <username>]
+#----------------------------------------------------------------------------
+
+CWD="$(basename "$0")"
+
+# ── policy limit for home directories (adjust if this changes) ───────────────
+HOME_QUOTA_GiB=10
+HOME_QUOTA_KB=$(( HOME_QUOTA_GiB * 1024 * 1024 ))
+
+# ── ANSI colours ──────────────────────────────────────────────────────────────
+BOLD="\033[1m";  RESET="\033[0m";  DIM="\033[2m"
+RED="\033[38;5;196m";  YELLOW="\033[38;5;220m"
+GREEN="\033[38;5;82m"; CYAN="\033[38;5;81m"
+WHITE="\033[97m";      BG_HDR="\033[48;5;237m"
+
+BAR_FILL="█"; BAR_EMPTY="░"; BAR_WIDTH=26
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+usage() {
+    cat <<EOF
+
+  ${BOLD}${CWD}${RESET}
+
+  ${BOLD}SYNOPSIS${RESET}
+      $CWD [-h] [-u <username>]
+
+  ${BOLD}DESCRIPTION${RESET}
+      Reports storage usage for BMRC filesystems:
+        • Home directory  — du vs ${HOME_QUOTA_GiB} GiB policy limit  (may take a few seconds)
+        • Group space(s)  — /well/<group>  (auto-detected, GPFS or Lustre)
+        • Shared scratch  — /well/kir/scratch
+
+  ${BOLD}OPTIONS${RESET}
+      -h, --help           Show this help
+      -u, --user <name>    Inspect another user's home (must have read access)
+
+EOF
+    exit 0
+}
+
+colour_for() {
+    local pct=$1
+    (( pct >= 90 )) && { echo -n "$RED";    return; }
+    (( pct >= 70 )) && { echo -n "$YELLOW"; return; }
+    echo -n "$GREEN"
+}
+
+draw_bar() {
+    local used=$1 total=$2 pct=0
+    (( total > 0 )) && pct=$(( used * 100 / total ))
+    (( pct > 100 )) && pct=100
+    local filled=$(( pct * BAR_WIDTH / 100 ))
+    local empty=$(( BAR_WIDTH - filled ))
+    local col; col=$(colour_for "$pct")
+    printf "${col}"
+    for (( i=0; i<filled; i++ )); do printf "%s" "$BAR_FILL"; done
+    printf "${DIM}"
+    for (( i=0; i<empty;  i++ )); do printf "%s" "$BAR_EMPTY"; done
+    printf "${RESET}"
+}
+
+human_kb() {
+    local kb=$1
+    if   (( kb >= 1073741824 )); then printf "%.1f TiB" "$(echo "scale=1; $kb/1073741824" | bc)"
+    elif (( kb >=    1048576 )); then printf "%.1f GiB" "$(echo "scale=1; $kb/1048576"    | bc)"
+    elif (( kb >=       1024 )); then printf "%.1f MiB" "$(echo "scale=1; $kb/1024"       | bc)"
+    else                               printf "%d KiB" "$kb"
+    fi
+}
+
+# Detect filesystem type label from df output (GPFS vs Lustre vs other)
+fs_type_label() {
+    local path="$1"
+    local fsname
+    fsname=$(df "$path" 2>/dev/null | tail -1 | awk '{print $1}')
+    if   [[ "$fsname" == *"@o2ib"* || "$fsname" == *"exafs"* ]]; then echo "Lustre"
+    elif [[ "$fsname" == WTGPFS*   || "$fsname" == gpfs*      ]]; then echo "GPFS"
+    else echo "$(basename "$fsname")"
+    fi
+}
+
+print_header() {
+    printf "\n"
+    printf "${BG_HDR}${BOLD}${WHITE}"
+    printf "  %-24s  %-11s  %-11s  %-${BAR_WIDTH}s  %5s  %s${RESET}\n" \
+        "Filesystem" "Used" "Limit/Size" "Usage" "%" "Notes"
+    printf "${DIM}%s${RESET}\n" "$(printf '%0.s─' {1..92})"
+}
+
+print_separator() {
+    printf "${DIM}%s${RESET}\n" "$(printf '%0.s─' {1..92})"
+}
+
+print_row() {
+    local label="$1" used_kb=$2 total_kb=$3 note="${4:-}"
+    local pct=0
+    (( total_kb > 0 )) && pct=$(( used_kb * 100 / total_kb ))
+    (( pct > 100 )) && pct=100
+    local col; col=$(colour_for "$pct")
+    printf "  ${BOLD}%-24s${RESET}  ${col}%-11s${RESET}  %-11s  " \
+        "$label" "$(human_kb "$used_kb")" "$(human_kb "$total_kb")"
+    draw_bar "$used_kb" "$total_kb"
+    printf "  ${col}%4d%%${RESET}" "$pct"
+    [[ -n "$note" ]] && printf "  ${DIM}%s${RESET}" "$note"
+    printf "\n"
+}
+
+# ── Home: du against policy quota ─────────────────────────────────────────────
+report_home() {
+    local target_user="$1"
+
+    # Resolve home path — use $HOME if checking ourselves, else derive it
+    local home_path
+    if [[ "$target_user" == "$USER" ]]; then
+        home_path="$HOME"
+    else
+        home_path=$(getent passwd "$target_user" 2>/dev/null | cut -d: -f6)
+        if [[ -z "$home_path" || ! -d "$home_path" ]]; then
+            printf "  ${YELLOW}⚠  Cannot resolve home directory for '%s'${RESET}\n" "$target_user"
+            return 1
+        fi
+    fi
+
+    # Check read access before running du
+    if [[ ! -r "$home_path" ]]; then
+        printf "  ${YELLOW}⚠  No read access to %s${RESET}\n" "$home_path"
+        return 1
+    fi
+
+    # du can be slow — print an inline notice, then overwrite with the result
+    printf "  ${DIM}Calculating home usage (du)...${RESET}" >&2
+
+    local used_kb
+    used_kb=$(du -sk "$home_path" 2>/dev/null | awk '{print $1}')
+
+    # Clear the "calculating" message
+    printf "\r%-40s\r" "" >&2
+
+    if [[ -z "$used_kb" ]]; then
+        printf "  ${YELLOW}⚠  du failed on %s${RESET}\n" "$home_path"
+        return 1
+    fi
+
+    print_row "home (${target_user})" "$used_kb" "$HOME_QUOTA_KB" \
+        "${home_path}  [${HOME_QUOTA_GiB} GiB policy]"
+}
+
+# ── df-based reporter ─────────────────────────────────────────────────────────
+report_df() {
+    local label="$1" path="$2" note="${3:-}"
+
+    if [[ ! -d "$path" ]]; then
+        printf "  ${DIM}%-24s  (path not accessible)${RESET}\n" "$label"
+        return
+    fi
+
+    local df_out; df_out=$(df -BK "$path" 2>/dev/null | tail -1) || {
+        printf "  ${DIM}%-24s  (df failed)${RESET}\n" "$label"
+        return
+    }
+
+    local _fs size_k used_k _rest
+    read -r _fs size_k used_k _rest <<< "$df_out"
+    size_k=${size_k%K}; used_k=${used_k%K}
+
+    # Auto-build note with filesystem type if none supplied
+    if [[ -z "$note" ]]; then
+        note="$(fs_type_label "$path")"
+    fi
+
+    print_row "$label" "$used_k" "$size_k" "$note"
+}
+
+# ── Auto-detect /well/<group> mounts ─────────────────────────────────────────
+report_groups() {
+    local target_user="$1"
+    local found=0
+    while IFS= read -r grp; do
+        [[ "$grp" == "kir" ]] && continue                      # ← skip the shared admin group
+        [[ -d "/well/${grp}" ]] || continue
+        local fslabel; fslabel=$(fs_type_label "/well/${grp}")
+        report_df "group: ${grp}" "/well/${grp}" "$fslabel"
+        (( found++ ))
+    done < <(id -Gn "$target_user" 2>/dev/null | tr ' ' '\n' | sort -u)
+
+    (( found == 0 )) && \
+        printf "  ${DIM}%-24s  (no /well/<group> mount found for %s's groups)${RESET}\n" \
+            "group" "$target_user"
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+main() {
+    local target_user="$USER"
+
+    while (( $# > 0 )); do
+        case $1 in
+            -u|--user) shift; target_user="$1" ;;
+            -h|--help) usage ;;
+            -*) printf "${YELLOW}Unknown option: %s${RESET}\n" "$1"; usage ;;
+        esac
+        shift
+    done
+
+    if [[ "$target_user" != "$USER" ]] && (( EUID != 0 )); then
+        printf "${YELLOW}Note: reading another user's home requires read access to their directory.${RESET}\n"
+    fi
+
+    printf "\n${BOLD}${CYAN}  BMRC Storage Report${RESET}  "
+    printf "${DIM}%s  |  user: %s${RESET}\n" "$(date '+%Y-%m-%d %H:%M')" "$target_user"
+
+    print_header
+
+    report_home "$target_user"
+    print_separator
+    report_groups "$target_user"
+    print_separator
+    report_df "kir/scratch" "/well/kir/scratch" "GPFS  (shared — not per-user)"
+
+    printf "\n${DIM}  Colour guide: ${GREEN}█${RESET}${DIM} <70%%   ${YELLOW}█${RESET}${DIM} 70–89%%   ${RED}█${RESET}${DIM} ≥90%%"
+    printf "   |   group & scratch figures are filesystem-wide${RESET}\n\n"
+}
+
+main "$@"
