@@ -1,0 +1,500 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["textual>=0.80"]
+# ///
+"""
+slurm_tui.py — A zero-config Slurm terminal UI
+
+Usage:
+    uv run slurm_tui.py          # explicit
+    ./slurm_tui.py               # if chmod +x (shebang handles it)
+
+Keys:
+    1  →  My Jobs   (squeue --me)
+    2  →  Partitions (sinfo)
+    3  →  Free Nodes (sinfo --format=...)
+    r  →  Force refresh
+    q  →  Quit
+"""
+
+import shlex
+import subprocess
+from datetime import datetime
+
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Container, Horizontal, Vertical
+from textual.css.query import NoMatches
+from textual.reactive import reactive
+from textual.widgets import (
+    DataTable,
+    Footer,
+    Header,
+    Label,
+    Static,
+    TabbedContent,
+    TabPane,
+)
+from textual.worker import Worker, WorkerState, get_current_worker
+
+# ─── Slurm field colours ─────────────────────────────────────────────────────
+
+JOB_STATE_COLOURS = {
+    "RUNNING":   "green",
+    "PENDING":   "yellow",
+    "FAILED":    "red",
+    "COMPLETED": "cyan",
+    "CANCELLED": "magenta",
+    "TIMEOUT":   "dark_orange",
+    "SUSPENDED": "blue",
+}
+
+NODE_STATE_COLOURS = {
+    "idle":      "green",
+    "mixed":     "yellow",
+    "allocated": "dark_orange",
+    "down":      "red",
+    "drain":     "magenta",
+    "draining":  "magenta",
+}
+
+
+def colour_state(state: str, mapping: dict) -> str:
+    colour = mapping.get(state.strip().upper() if state else "", None)
+    if not colour:
+        colour = mapping.get(state.strip().lower() if state else "", "dim white")
+    return f"[{colour}]{state}[/{colour}]" if colour else state
+
+
+# ─── Slurm parsers ────────────────────────────────────────────────────────────
+
+SQUEUE_FORMAT = "%13i|%8u|%9a|%20j|%4C|%7m|%10P|%20S|%11L|%10T|%20R"
+
+SQUEUE_COLS = [
+    ("JOBID",       str),
+    ("USER",        str),
+    ("ACCOUNT",     str),
+    ("NAME",        str),
+    ("CPUS",        str),
+    ("MEM",         str),
+    ("PARTITION",   str),
+    ("START",       str),
+    ("TIMELEFT",    str),
+    ("STATE",       str),
+    ("NODE/REASON", str),
+]
+
+SINFO_FREE_FORMAT = "%16P|%.8m|%.5a|%10T|%.5D|%80N"
+SINFO_FREE_COLS = [
+    ("PARTITION",   str),
+    ("MEMORY",      str),
+    ("AVAIL",       str),
+    ("STATE",       str),
+    ("NODES",       str),
+    ("NODELIST",    str),
+]
+
+
+def _run(cmd: str) -> list[str]:
+    """Run a shell command and return stdout lines (no shell=True)."""
+    try:
+        result = subprocess.run(
+            shlex.split(cmd),
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        return result.stdout.strip().splitlines()
+    except FileNotFoundError:
+        return ["[ERROR: command not found]"]
+    except subprocess.TimeoutExpired:
+        return ["[ERROR: command timed out]"]
+    except Exception as e:
+        return [f"[ERROR: {e}]"]
+
+
+def fetch_my_jobs() -> list[dict]:
+    lines = _run(f"squeue --me --format='{SQUEUE_FORMAT}' --noheader")
+    rows = []
+    for line in lines:
+        if line.startswith("[ERROR"):
+            rows.append({c: line if i == 0 else "" for i, (c, _) in enumerate(SQUEUE_COLS)})
+            break
+        parts = line.split("|")
+        if len(parts) < len(SQUEUE_COLS):
+            continue
+        rows.append({col: parts[i].strip() for i, (col, _) in enumerate(SQUEUE_COLS)})
+    return rows
+
+
+def fetch_partitions() -> list[dict]:
+    # sinfo with useful columns
+    fmt = "%20P|%6a|%12l|%5A|%10T|%80N"
+    lines = _run(f"sinfo --format='{fmt}' --noheader")
+    cols = ["PARTITION", "AVAIL", "TIMELIMIT", "NODES(A/I/O/T)", "STATE", "NODELIST"]
+    rows = []
+    for line in lines:
+        if line.startswith("[ERROR"):
+            rows.append({c: line if i == 0 else "" for i, c in enumerate(cols)})
+            break
+        parts = line.split("|")
+        if len(parts) < len(cols):
+            continue
+        rows.append({col: parts[i].strip() for i, col in enumerate(cols)})
+    return rows
+
+
+def fetch_free_nodes() -> list[dict]:
+    lines = _run(f"sinfo --format='{SINFO_FREE_FORMAT}' --noheader")
+    rows = []
+    for line in lines:
+        if line.startswith("[ERROR"):
+            rows.append({c: line if i == 0 else "" for i, (c, _) in enumerate(SINFO_FREE_COLS)})
+            break
+        parts = line.split("|")
+        if len(parts) < len(SINFO_FREE_COLS):
+            continue
+        rows.append({col: parts[i].strip() for i, (col, _) in enumerate(SINFO_FREE_COLS)})
+    return rows
+
+
+# ─── Demo / fallback data (used when slurm is not available) ──────────────────
+
+DEMO_JOBS = [
+    {"JOBID": "18342901", "USER": "dnindu", "ACCOUNT": "kir.prj", "NAME": "abbuilder2_01",  "CPUS": "4",  "MEM": "16G",   "PARTITION": "short",       "START": "09:12:44", "TIMELEFT": "2:31:07",    "STATE": "RUNNING",  "NODE/REASON": "wren2.cluster"},
+    {"JOBID": "18342902", "USER": "dnindu", "ACCOUNT": "kir.prj", "NAME": "abbuilder2_02",  "CPUS": "4",  "MEM": "16G",   "PARTITION": "short",       "START": "09:12:44", "TIMELEFT": "2:31:02",    "STATE": "RUNNING",  "NODE/REASON": "wren3.cluster"},
+    {"JOBID": "18342910", "USER": "dnindu", "ACCOUNT": "kir.prj", "NAME": "af3_inference",  "CPUS": "8",  "MEM": "64G",   "PARTITION": "gpu_short",   "START": "10:05:00", "TIMELEFT": "3:54:59",    "STATE": "RUNNING",  "NODE/REASON": "gpu01.cluster"},
+    {"JOBID": "18342950", "USER": "dnindu", "ACCOUNT": "kir.prj", "NAME": "picrust2_job",   "CPUS": "16", "MEM": "32G",   "PARTITION": "long",        "START": "11:00:00", "TIMELEFT": "6-23:14:01", "STATE": "RUNNING",  "NODE/REASON": "compute14"},
+    {"JOBID": "18342988", "USER": "dnindu", "ACCOUNT": "kir.prj", "NAME": "cellranger_01",  "CPUS": "12", "MEM": "128G",  "PARTITION": "short",       "START": "N/A",      "TIMELEFT": "N/A",        "STATE": "PENDING",  "NODE/REASON": "Resources"},
+    {"JOBID": "18342989", "USER": "dnindu", "ACCOUNT": "kir.prj", "NAME": "cellranger_02",  "CPUS": "12", "MEM": "128G",  "PARTITION": "short",       "START": "N/A",      "TIMELEFT": "N/A",        "STATE": "PENDING",  "NODE/REASON": "Priority"},
+    {"JOBID": "18342999", "USER": "dnindu", "ACCOUNT": "kir.prj", "NAME": "snakemake_drv",  "CPUS": "2",  "MEM": "4G",    "PARTITION": "interactive", "START": "08:30:00", "TIMELEFT": "3:29:59",    "STATE": "RUNNING",  "NODE/REASON": "login01"},
+]
+
+DEMO_PARTITIONS = [
+    {"PARTITION": "short*",      "AVAIL": "up", "TIMELIMIT": "12:00:00",    "NODES(A/I/O/T)": "16/38/2/54",  "STATE": "mixed",     "NODELIST": "compute[01-54]"},
+    {"PARTITION": "long",        "AVAIL": "up", "TIMELIMIT": "7-00:00:00",  "NODES(A/I/O/T)": "22/30/0/52",  "STATE": "mixed",     "NODELIST": "compute[55-106]"},
+    {"PARTITION": "gpu_short",   "AVAIL": "up", "TIMELIMIT": "12:00:00",    "NODES(A/I/O/T)": "3/1/0/4",     "STATE": "mixed",     "NODELIST": "gpu[01-04]"},
+    {"PARTITION": "gpu_long",    "AVAIL": "up", "TIMELIMIT": "3-00:00:00",  "NODES(A/I/O/T)": "2/0/1/3",     "STATE": "mixed",     "NODELIST": "gpu[05-07]"},
+    {"PARTITION": "interactive", "AVAIL": "up", "TIMELIMIT": "4:00:00",     "NODES(A/I/O/T)": "1/1/0/2",     "STATE": "mixed",     "NODELIST": "login[01-02]"},
+    {"PARTITION": "himem",       "AVAIL": "up", "TIMELIMIT": "24:00:00",    "NODES(A/I/O/T)": "0/4/0/4",     "STATE": "idle",      "NODELIST": "himem[01-04]"},
+    {"PARTITION": "transfer",    "AVAIL": "up", "TIMELIMIT": "2:00:00",     "NODES(A/I/O/T)": "0/2/0/2",     "STATE": "idle",      "NODELIST": "transfer[01-02]"},
+]
+
+DEMO_FREE = [
+    {"PARTITION": "short*",      "MEMORY": "256000M",  "AVAIL": "up", "STATE": "idle",      "NODES": "14", "NODELIST": "compute[03,07,12,15-18,22,31,38]"},
+    {"PARTITION": "short*",      "MEMORY": "256000M",  "AVAIL": "up", "STATE": "mixed",     "NODES": "38", "NODELIST": "compute[01-02,04-06,08-11,13-14,19-21]"},
+    {"PARTITION": "short*",      "MEMORY": "256000M",  "AVAIL": "up", "STATE": "allocated", "NODES": "2",  "NODELIST": "compute[16,33]"},
+    {"PARTITION": "long",        "MEMORY": "256000M",  "AVAIL": "up", "STATE": "idle",      "NODES": "30", "NODELIST": "compute[55-70,80-94]"},
+    {"PARTITION": "long",        "MEMORY": "256000M",  "AVAIL": "up", "STATE": "mixed",     "NODES": "22", "NODELIST": "compute[71-79,95-106]"},
+    {"PARTITION": "gpu_short",   "MEMORY": "512000M",  "AVAIL": "up", "STATE": "idle",      "NODES": "1",  "NODELIST": "gpu04"},
+    {"PARTITION": "gpu_short",   "MEMORY": "512000M",  "AVAIL": "up", "STATE": "mixed",     "NODES": "3",  "NODELIST": "gpu[01-03]"},
+    {"PARTITION": "himem",       "MEMORY": "2048000M", "AVAIL": "up", "STATE": "idle",      "NODES": "4",  "NODELIST": "himem[01-04]"},
+]
+
+
+def _is_slurm_available() -> bool:
+    try:
+        result = subprocess.run(["which", "squeue"], capture_output=True, timeout=3)
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+SLURM_AVAILABLE = _is_slurm_available()
+
+
+# ─── CSS ──────────────────────────────────────────────────────────────────────
+
+CSS = """
+Screen {
+    background: #0b0f16;
+    color: #c8d8e8;
+}
+
+Header {
+    background: #080c12;
+    color: #4a90d9;
+    text-style: bold;
+}
+
+Footer {
+    background: #080c12;
+    color: #2a4060;
+}
+
+TabbedContent {
+    height: 1fr;
+}
+
+TabPane {
+    padding: 0;
+}
+
+.status-bar {
+    height: 1;
+    background: #080c12;
+    padding: 0 2;
+    dock: bottom;
+}
+
+.status-bar Label {
+    color: #2a4060;
+}
+
+.status-running {
+    color: green;
+}
+
+.status-pending {
+    color: yellow;
+}
+
+.refresh-label {
+    color: #4a90d9;
+    dock: right;
+}
+
+.demo-banner {
+    background: #2a1a00;
+    color: #ffd43b;
+    height: 1;
+    text-align: center;
+    text-style: bold;
+    dock: top;
+}
+
+DataTable {
+    background: #0b0f16;
+    color: #c8d8e8;
+    height: 1fr;
+}
+
+DataTable > .datatable--header {
+    background: #080c12;
+    color: #3d5268;
+    text-style: bold;
+}
+
+DataTable > .datatable--cursor {
+    background: #132030;
+    color: #dce8f0;
+}
+
+DataTable > .datatable--hover {
+    background: #0f1a28;
+}
+
+DataTable:focus > .datatable--cursor {
+    background: #1a3050;
+}
+"""
+
+
+# ─── Widgets ──────────────────────────────────────────────────────────────────
+
+class SlurmTable(Static):
+    """A refreshable DataTable wrapper for a Slurm command."""
+
+    DEFAULT_CSS = "SlurmTable { height: 1fr; }"
+
+    def __init__(self, table_id: str, **kwargs):
+        super().__init__(**kwargs)
+        self._table_id = table_id
+
+    def compose(self) -> ComposeResult:
+        yield DataTable(id=self._table_id, cursor_type="row", zebra_stripes=True)
+
+    def get_table(self) -> DataTable:
+        return self.query_one(f"#{self._table_id}", DataTable)
+
+
+# ─── Main App ─────────────────────────────────────────────────────────────────
+
+REFRESH_SECONDS = 120
+
+
+class SlurmTUI(App):
+    """Zero-config Slurm terminal UI."""
+
+    TITLE = "SLURM · BMRC"
+    SUB_TITLE = "Oxford"
+    CSS = CSS
+    BINDINGS = [
+        Binding("1", "switch_tab('jobs')",        "My Jobs",    show=True),
+        Binding("2", "switch_tab('partitions')",  "Partitions", show=True),
+        Binding("3", "switch_tab('free')",        "Free Nodes", show=True),
+        Binding("r", "refresh_data",              "Refresh",    show=True),
+        Binding("q", "quit",                      "Quit",       show=True),
+    ]
+
+    countdown: reactive[int] = reactive(REFRESH_SECONDS)
+    last_refresh: reactive[str] = reactive("never")
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        if not SLURM_AVAILABLE:
+            yield Static(
+                "⚠  Slurm not detected — showing demo data.  Run on a login node for live data.",
+                classes="demo-banner",
+            )
+        with TabbedContent(initial="jobs", id="tabs"):
+            with TabPane("1 · My Jobs", id="jobs"):
+                yield SlurmTable("tbl-jobs")
+            with TabPane("2 · Partitions", id="partitions"):
+                yield SlurmTable("tbl-partitions")
+            with TabPane("3 · Free Nodes", id="free"):
+                yield SlurmTable("tbl-free")
+        with Horizontal(classes="status-bar"):
+            yield Label("", id="lbl-running", classes="status-running")
+            yield Label("  ", id="lbl-sep1")
+            yield Label("", id="lbl-pending", classes="status-pending")
+            yield Label("  │  press 1 2 3 to switch · r to refresh · q to quit", id="lbl-hint")
+            yield Label("", id="lbl-refresh", classes="refresh-label")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self._init_tables()
+        self.action_refresh_data()
+        self.set_interval(1, self._tick)
+
+    # ── Table initialisation ──────────────────────────────────────────────────
+
+    def _init_tables(self) -> None:
+        self._init_jobs_table()
+        self._init_partitions_table()
+        self._init_free_table()
+
+    def _init_jobs_table(self) -> None:
+        tbl: DataTable = self.query_one("#tbl-jobs", DataTable)
+        tbl.clear(columns=True)
+        cols = [c for c, _ in SQUEUE_COLS]
+        for col in cols:
+            tbl.add_column(col, key=col)
+
+    def _init_partitions_table(self) -> None:
+        tbl: DataTable = self.query_one("#tbl-partitions", DataTable)
+        tbl.clear(columns=True)
+        for col in ["PARTITION", "AVAIL", "TIMELIMIT", "NODES(A/I/O/T)", "STATE", "NODELIST"]:
+            tbl.add_column(col, key=col)
+
+    def _init_free_table(self) -> None:
+        tbl: DataTable = self.query_one("#tbl-free", DataTable)
+        tbl.clear(columns=True)
+        for col, _ in SINFO_FREE_COLS:
+            tbl.add_column(col, key=col)
+
+    # ── Refresh logic ─────────────────────────────────────────────────────────
+
+    def action_refresh_data(self) -> None:
+        self.countdown = REFRESH_SECONDS
+        self.run_worker(self._fetch_and_update, exclusive=True, thread=True)
+
+    def _fetch_and_update(self) -> None:
+        """Runs in a worker thread so the UI stays responsive."""
+        if SLURM_AVAILABLE:
+            jobs = fetch_my_jobs()
+            parts = fetch_partitions()
+            free = fetch_free_nodes()
+        else:
+            jobs = DEMO_JOBS
+            parts = DEMO_PARTITIONS
+            free = DEMO_FREE
+
+        # Post back to the main thread
+        self.call_from_thread(self._populate_jobs, jobs)
+        self.call_from_thread(self._populate_partitions, parts)
+        self.call_from_thread(self._populate_free, free)
+        self.call_from_thread(self._update_status, jobs)
+
+    def _populate_jobs(self, rows: list[dict]) -> None:
+        tbl: DataTable = self.query_one("#tbl-jobs", DataTable)
+        tbl.clear()
+        for row in rows:
+            state = row.get("STATE", "")
+            coloured_state = colour_state(state, JOB_STATE_COLOURS)
+            tbl.add_row(
+                row.get("JOBID", ""),
+                row.get("USER", ""),
+                row.get("ACCOUNT", ""),
+                row.get("NAME", ""),
+                row.get("CPUS", ""),
+                row.get("MEM", ""),
+                row.get("PARTITION", ""),
+                row.get("START", ""),
+                row.get("TIMELEFT", ""),
+                coloured_state,
+                row.get("NODE/REASON", ""),
+            )
+        self.last_refresh = datetime.now().strftime("%H:%M:%S")
+
+    def _populate_partitions(self, rows: list[dict]) -> None:
+        tbl: DataTable = self.query_one("#tbl-partitions", DataTable)
+        tbl.clear()
+        for row in rows:
+            state = row.get("STATE", "")
+            avail = row.get("AVAIL", "")
+            avail_col = f"[green]{avail}[/green]" if avail == "up" else f"[red]{avail}[/red]"
+            tbl.add_row(
+                row.get("PARTITION", ""),
+                avail_col,
+                row.get("TIMELIMIT", ""),
+                row.get("NODES(A/I/O/T)", ""),
+                colour_state(state, NODE_STATE_COLOURS),
+                row.get("NODELIST", ""),
+            )
+
+    def _populate_free(self, rows: list[dict]) -> None:
+        tbl: DataTable = self.query_one("#tbl-free", DataTable)
+        tbl.clear()
+        state_order = {"idle": 0, "mixed": 1, "allocated": 2, "draining": 3, "drain": 4, "down": 5}
+        rows = sorted(rows, key=lambda r: state_order.get(r.get("STATE", "").lower(), 99))
+        for row in rows:
+            state = row.get("STATE", "")
+            avail = row.get("AVAIL", "")
+            avail_col = f"[green]{avail}[/green]" if avail == "up" else f"[red]{avail}[/red]"
+            tbl.add_row(
+                row.get("PARTITION", ""),
+                row.get("MEMORY", ""),
+                avail_col,
+                colour_state(state, NODE_STATE_COLOURS),
+                row.get("NODES", ""),
+                row.get("NODELIST", ""),
+            )
+
+    def _update_status(self, jobs: list[dict]) -> None:
+        running = sum(1 for j in jobs if j.get("STATE") == "RUNNING")
+        pending = sum(1 for j in jobs if j.get("STATE") == "PENDING")
+        try:
+            self.query_one("#lbl-running", Label).update(f"● RUNNING {running}")
+            self.query_one("#lbl-pending", Label).update(f"⧗ PENDING {pending}")
+        except NoMatches:
+            pass
+
+    # ── Timer tick ────────────────────────────────────────────────────────────
+
+    def _tick(self) -> None:
+        self.countdown -= 1
+        if self.countdown <= 0:
+            self.action_refresh_data()
+        # Update refresh label
+        colour = "dark_orange" if self.countdown <= 15 else "steel_blue"
+        try:
+            self.query_one("#lbl-refresh", Label).update(
+                f"[{colour}]↺ {self.countdown:>3}s[/{colour}]  "
+                f"[dim]last {self.last_refresh}[/dim]"
+            )
+        except NoMatches:
+            pass
+
+    # ── Tab switching ─────────────────────────────────────────────────────────
+
+    def action_switch_tab(self, tab_id: str) -> None:
+        try:
+            self.query_one("#tabs", TabbedContent).active = tab_id
+        except NoMatches:
+            pass
+
+
+if __name__ == "__main__":
+    SlurmTUI().run()
