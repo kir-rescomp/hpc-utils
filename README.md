@@ -1,6 +1,4 @@
-<center>
-# `hpc-utils`
-</center>
+<h2 align="center">hpc-utils</h2>
 
 <p align="center">
     <img src="https://github.com/kir-rescomp/.github/blob/main/profile_images/hpc-utils-logo.png" alt="hpc-utils" width="350"/>
