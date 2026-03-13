@@ -1,0 +1,300 @@
+#!/usr/bin/python3
+
+# Enhanced version of seff script with color coding and improved formatting
+# This script is roughly equivalent to:
+# sacct -P -n -a --format JobID,User,State,Cluster,AllocCPUS,REQMEM,TotalCPU,Elapsed,MaxRSS,NNodes,NTasks -j <job_id>
+
+import sys, getopt, json, subprocess, os
+
+# ANSI color codes
+class Colors:
+    RED = '\033[91m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    BLUE = '\033[94m'
+    MAGENTA = '\033[95m'
+    CYAN = '\033[96m'
+    WHITE = '\033[97m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+    END = '\033[0m'
+    
+    @staticmethod
+    def disable_if_no_tty():
+        """Disable colors if output is not a terminal"""
+        if not sys.stdout.isatty():
+            Colors.RED = Colors.GREEN = Colors.YELLOW = Colors.BLUE = ''
+            Colors.MAGENTA = Colors.CYAN = Colors.WHITE = Colors.BOLD = ''
+            Colors.UNDERLINE = Colors.END = ''
+
+def colorize_efficiency(efficiency, thresholds=(80, 60)):
+    """Color code efficiency values based on thresholds"""
+    high, medium = thresholds
+    if efficiency >= high:
+        return f"{Colors.GREEN}{efficiency:5.1f}%{Colors.END}"
+    elif efficiency >= medium:
+        return f"{Colors.YELLOW}{efficiency:5.1f}%{Colors.END}"
+    else:
+        return f"{Colors.RED}{efficiency:5.1f}%{Colors.END}"
+
+def colorize_state(state):
+    """Color code job states"""
+    state_str = str(state).strip("[]'")
+    color_map = {
+        'COMPLETED': Colors.GREEN,
+        'FAILED': Colors.RED,
+        'CANCELLED': Colors.YELLOW,
+        'TIMEOUT': Colors.RED,
+        'RUNNING': Colors.BLUE,
+        'PENDING': Colors.CYAN,
+    }
+    color = color_map.get(state_str, Colors.WHITE)
+    return f"{color}{state_str}{Colors.END}"
+
+# Convert elapsed time to string.
+def time2str(seconds):
+    (minutes, seconds) = divmod(int(seconds), 60)
+    (hours, minutes) = divmod(minutes, 60)
+    (days, hours) = divmod(hours, 24)
+    days = '' if days < 1 else f'{days}-'
+    return days + "{:02}:{:02}:{:02}".format(hours, minutes, seconds)
+
+# Convert memory to human-readable string with better formatting.
+def kbytes2str(kbytes):
+    from math import log
+    if kbytes == 0:
+        return "0.00 MB"
+    mul = 1024
+    exp = int(log(kbytes) / log(mul))
+    pre = "kMGTPE "[exp]
+    size = kbytes / mul**exp
+    # Use appropriate decimal places based on size
+    if size >= 100:
+        return f"{size:.0f} {pre.strip()}B"
+    elif size >= 10:
+        return f"{size:.1f} {pre.strip()}B"
+    else:
+        return f"{size:.2f} {pre.strip()}B"
+
+def print_header(text):
+    """Print a formatted header"""
+    print(f"\n{Colors.BOLD}{Colors.UNDERLINE}{text}{Colors.END}")
+
+def print_metric(label, value, unit="", color=""):
+    """Print a formatted metric"""
+    if color:
+        print(f"{Colors.BOLD}{label}:{Colors.END} {color}{value}{Colors.END}{unit}")
+    else:
+        print(f"{Colors.BOLD}{label}:{Colors.END} {value}{unit}")
+
+def print_efficiency_bar(efficiency, width=30):
+    """Print a visual efficiency bar"""
+    filled = int(efficiency * width / 100)
+    bar = "█" * filled + "░" * (width - filled)
+    
+    if efficiency >= 80:
+        color = Colors.GREEN
+    elif efficiency >= 60:
+        color = Colors.YELLOW
+    else:
+        color = Colors.RED
+    
+    return f"{color}{bar}{Colors.END} {colorize_efficiency(efficiency)}"
+
+def sacct(*args):
+    p = subprocess.run(['sacct', '--json'] + list(args),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=True)
+    return json.loads(p.stdout)
+
+def ex_tres(objs, name, default=None, field='count'):
+    tres = {m['type']: m[field] for m in objs}
+    if name not in tres and default is not None:
+        return default
+    return tres[name]
+
+def print_summary(jobs_processed, avg_cpu_eff, avg_mem_eff):
+    """Print a summary for multiple jobs"""
+    print_header(f"Summary ({jobs_processed} jobs processed)")
+    print(f"Average CPU Efficiency: {colorize_efficiency(avg_cpu_eff)}")
+    print(f"Average Memory Efficiency: {colorize_efficiency(avg_mem_eff)}")
+
+# Parse command line arguments
+(opts, args) = getopt.getopt(sys.argv[1:], 'hvdfj:M:c')
+opts = dict(opts)
+
+# Check for color option or auto-detect
+if '-c' in opts or sys.stdout.isatty():
+    Colors.disable_if_no_tty()
+else:
+    Colors.disable_if_no_tty()
+
+if '-v' in opts:
+    print(f"{Colors.BOLD}KIR Enhanced version of seff{Colors.END}")
+    print("Features: Color coding, efficiency bars, improved formatting")
+    sys.exit(0)
+
+if '-h' in opts or not (args or '-j' in opts):
+    print(f"{Colors.BOLD}Usage:{Colors.END} seff [Options] <JobID>")
+    print(f"{Colors.BOLD}Options:{Colors.END}")
+    print("       -M    Cluster")
+    print("       -h    Help")
+    print("       -j    JobID")
+    print("       -v    Version")
+    print("       -c    Force color output")
+    sys.exit(0)
+
+if '-M' in opts:
+    clusteropts = ['-M', opts['-M']]
+else:
+    clusteropts = []
+
+if '-j' in opts:
+    job_ids = [opts['-j']]
+else:
+    job_ids = []
+job_ids.extend(args)
+
+sacct_args = clusteropts + ['-j', ','.join(job_ids)]
+
+try:
+    jobs = sacct(*sacct_args)["jobs"]
+except subprocess.CalledProcessError as e:
+    print(f"{Colors.RED}Error running sacct: {e}{Colors.END}", file=sys.stderr)
+    sys.exit(2)
+except json.JSONDecodeError as e:
+    print(f"{Colors.RED}Error parsing sacct output: {e}{Colors.END}", file=sys.stderr)
+    sys.exit(2)
+
+if len(jobs) < 1:
+    print(f"{Colors.RED}Job not found.{Colors.END}", file=sys.stderr)
+    sys.exit(2)
+
+# Track statistics for summary
+processed_jobs = 0
+total_cpu_eff = 0
+total_mem_eff = 0
+
+for i, job in enumerate(jobs):
+    if i > 0:
+        print("\n" + "─" * 60)
+
+    jobid = job['job_id']
+    user = job['association']['user']
+    state = job['state']['current']
+    ncpus = ex_tres(job['tres']['allocated'], 'cpu', 0)
+
+    print_header(f"Job Efficiency Report")
+    
+    if state == "RUNNING" or ncpus == 0 or 'fffffff' in hex(ncpus):
+        print(f"{Colors.YELLOW}Efficiency not available for {state} jobs.{Colors.END}")
+        continue
+    
+    ncores = (ncpus + 1) // 2
+    clustername = job['cluster']
+    nnodes = job['allocation_nodes']
+    reqmem = ex_tres(job['tres']['allocated'], 'mem') * 1024
+    walltime = job['time']['elapsed']
+    timelimit = job['time']['limit']['number'] * 60
+
+    array_job_id = job['array']['job_id']
+    if array_job_id != 0:
+        array_task_id = job['array']['task_id']['number']
+        array_jobid = f"{array_job_id}_{array_task_id}"
+    else:
+        array_jobid = ""
+
+    # Calculate CPU usage
+    tot_cpu_sec = 0
+    tot_cpu_usec = 0
+    mem = -1
+    for step in job['steps']:
+        used = step['tres']['requested']
+        cputime = step['time']['total']
+        tot_cpu_sec += cputime['seconds']
+        tot_cpu_usec += cputime['microseconds']
+        lmem = ex_tres(used['total'], 'mem', 0) / 1024
+        if mem < lmem:
+            (mem, the_step, the_usage) = (lmem, step, used)
+
+    cput = tot_cpu_sec + int((tot_cpu_usec / 1000000) + 0.5)
+    ntasks = the_step['tasks']['count']
+
+    # Basic job info
+    print_metric("Cluster", clustername, color=Colors.CYAN)
+    print_metric("Job ID", jobid, color=Colors.CYAN)
+    if array_jobid:
+        print_metric("Array Job ID", array_jobid, color=Colors.CYAN)
+    print_metric("User", user, color=Colors.CYAN)
+    print_metric("State", "", color=colorize_state(state))
+    print_metric("Cores", ncores)
+    print_metric("Tasks", ntasks)
+    print_metric("Nodes", nnodes)
+
+    print()  # Spacing
+
+    # Efficiency calculations
+    min_mem = ex_tres(the_usage['min'], 'mem', 0) / 1024
+    max_mem = ex_tres(the_usage['max'], 'mem', min_mem) / 1024
+    pernode = ex_tres(the_usage['max'], 'mem', 0, field='task') == -1
+
+    corewalltime = walltime * ncores
+    if corewalltime:
+        cpu_eff = cput / corewalltime * 100
+    else:
+        cpu_eff = 0.0
+
+    if reqmem:
+        mem_eff = mem / reqmem * 100
+    else:
+        mem_eff = 0.0
+
+    wall_eff = 100 * walltime / timelimit if timelimit > 0 else 0.0
+
+    # Print efficiency metrics with bars
+    print(f"{Colors.BOLD}Job Wall-time:{Colors.END}")
+    print(f"  {print_efficiency_bar(wall_eff)} {time2str(walltime)} of {time2str(timelimit)} time limit")
+    
+    print(f"{Colors.BOLD}CPU Efficiency:{Colors.END}")
+    print(f"  {print_efficiency_bar(cpu_eff)} {time2str(cput)} of {time2str(corewalltime)} core-walltime")
+    
+    print(f"{Colors.BOLD}Memory Efficiency:{Colors.END}")
+    if ntasks == 1:
+        print(f"  {print_efficiency_bar(mem_eff)} {kbytes2str(mem)} of {kbytes2str(reqmem)}")
+    else:
+        (denom, desc) = (nnodes, 'node') if pernode else (ntasks, 'task')
+        print(f"  {print_efficiency_bar(mem_eff)} {kbytes2str(mem)} ({kbytes2str(min_mem)} to {kbytes2str(max_mem)} / {desc}) of {kbytes2str(reqmem)} ({kbytes2str(reqmem / denom)}/{desc})")
+
+    # Add efficiency recommendations
+    print(f"\n{Colors.BOLD}Recommendations:{Colors.END}")
+    recommendations = []
+    
+    if cpu_eff < 50:
+        recommendations.append(f"{Colors.RED}• CPU efficiency is low. Consider reducing core count or optimizing code.{Colors.END}")
+    elif cpu_eff > 95:
+        recommendations.append(f"{Colors.GREEN}• Excellent CPU utilization!{Colors.END}")
+    
+    if mem_eff < 10:
+        recommendations.append(f"{Colors.RED}• Memory usage is very low. Consider reducing memory request.{Colors.END}")
+    elif mem_eff > 90:
+        recommendations.append(f"{Colors.YELLOW}• High memory usage. Monitor for potential memory issues.{Colors.END}")
+    
+    if wall_eff < 50:
+        recommendations.append(f"{Colors.YELLOW}• Job finished early. Consider reducing time limit.{Colors.END}")
+    
+    if not recommendations:
+        recommendations.append(f"{Colors.GREEN}• Job resource usage looks reasonable.{Colors.END}")
+    
+    for rec in recommendations:
+        print(rec)
+
+    # Track for summary
+    processed_jobs += 1
+    total_cpu_eff += cpu_eff
+    total_mem_eff += mem_eff
+
+# Print summary if multiple jobs
+if processed_jobs > 1:
+    avg_cpu_eff = total_cpu_eff / processed_jobs
+    avg_mem_eff = total_mem_eff / processed_jobs
+    print("\n" + "═" * 60)
+    print_summary(processed_jobs, avg_cpu_eff, avg_mem_eff)
