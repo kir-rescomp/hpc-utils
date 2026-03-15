@@ -1,0 +1,147 @@
+Screen {
+    background: #0b0f16;
+    color: #c8d8e8;
+}
+
+Header {
+    background: #080c12;
+    color: #4a90d9;
+    text-style: bold;
+}
+
+Footer {
+    background: #080c12;
+    color: #2a4060;
+}
+
+TabbedContent {
+    height: 1fr;
+}
+
+TabPane {
+    padding: 0;
+}
+
+.status-bar {
+    height: 1;
+    background: #080c12;
+    padding: 0 2;
+    dock: bottom;
+}
+
+.status-bar Label {
+    color: #2a4060;
+}
+
+.status-running {
+    color: green;
+}
+
+.status-pending {
+    color: yellow;
+}
+
+.refresh-label {
+    color: #4a90d9;
+    dock: right;
+}
+
+.demo-banner {
+    background: #2a1a00;
+    color: #ffd43b;
+    height: 1;
+    text-align: center;
+    text-style: bold;
+    dock: top;
+}
+
+DataTable {
+    background: #0b0f16;
+    color: #c8d8e8;
+    height: 1fr;
+}
+
+DataTable > .datatable--header {
+    background: #080c12;
+    color: #3d5268;
+    text-style: bold;
+}
+
+DataTable > .datatable--cursor {
+    background: #132030;
+    color: #dce8f0;
+}
+
+DataTable > .datatable--hover {
+    background: #0f1a28;
+}
+
+DataTable:focus > .datatable--cursor {
+    background: #1a3050;
+}
+
+/* ── Job Efficiency tab ── */
+#eff-pane {
+    height: 1fr;
+    padding: 1 2;
+}
+
+#eff-input-row {
+    height: 3;
+    margin-bottom: 1;
+}
+
+#eff-job-input {
+    width: 30;
+    background: #0d1828;
+    border: tall #1e3050;
+    color: #c8d8e8;
+}
+
+#eff-job-input:focus {
+    border: tall #4a90d9;
+}
+
+#eff-run-btn {
+    margin-left: 1;
+    background: #1a3050;
+    color: #74b9d9;
+    border: tall #2a4a6a;
+    min-width: 12;
+}
+
+#eff-run-btn:hover {
+    background: #243d60;
+    color: #a0d0f0;
+}
+
+#eff-run-btn:focus {
+    border: tall #4a90d9;
+}
+
+#eff-not-found {
+    color: #ff6b6b;
+    height: 1;
+    margin-bottom: 1;
+}
+
+#eff-output {
+    height: 1fr;
+    background: #080c12;
+    border: tall #1a2530;
+    padding: 1;
+}
+
+#eff-clear-btn {
+    margin-left: 1;
+    background: #1a1a30;
+    color: #7a7aaa;
+    border: tall #2a2a4a;
+    min-width: 10;
+}
+
+#eff-clear-btn:hover {
+    background: #252540;
+    color: #a0a0cc;
+}
+
