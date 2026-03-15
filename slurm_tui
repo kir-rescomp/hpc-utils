@@ -259,7 +259,7 @@ class GpuInfoScreen(Screen):
 
     def _load(self) -> None:
         output = fetch_gpu_gres(self._partition)
-        self.call_from_thread(self._display, output)
+        self.app.call_from_thread(self._display, output)
 
     def _display(self, output: str) -> None:
         try:
@@ -333,6 +333,19 @@ class SlurmTUI(App):
         self._init_tables()
         self.action_refresh_data()
         self.set_interval(1, self._tick)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        # Only act on the free nodes table
+        if event.data_table.id != "tbl-free":
+            return
+        # Get the partition value from the first cell of the selected row
+        try:
+            tbl = self.query_one("#tbl-free", DataTable)
+            partition = str(tbl.get_row(event.row_key)[0]).strip().rstrip("*")
+            if partition.startswith("gpu_"):
+                self.push_screen(GpuInfoScreen(partition))
+        except Exception:
+            pass
 
     # ── Table initialisation ──────────────────────────────────────────────────
 
