@@ -147,6 +147,9 @@ def fetch_free_nodes() -> list[dict]:
         rows.append({col: parts[i].strip() for i, (col, _) in enumerate(SINFO_FREE_COLS)})
     return rows
 
+def fetch_gpu_gres(partition: str) -> str:
+    lines = _run(f"sinfo -p {partition} --Format=nodelist,gres:50 --noheader")
+    return "\n".join(lines) if lines else "(no output)"
 
 # ─── Demo / fallback data (used when slurm is not available) ──────────────────
 
