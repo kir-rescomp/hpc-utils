@@ -43,6 +43,7 @@ from textual.widgets import (
     TabPane,
 )
 from textual.worker import get_current_worker
+from textual.app import App, ComposeResult, Screen
 
 # ─── Slurm field colours ─────────────────────────────────────────────────────
 
@@ -238,6 +239,38 @@ class SlurmTable(Static):
     def get_table(self) -> DataTable:
         return self.query_one(f"#{self._table_id}", DataTable)
 
+#GPU gres information popuo
+class GpuInfoScreen(Screen):
+    BINDINGS = [Binding("escape,q", "dismiss", "Close")]
+
+    def __init__(self, partition: str, **kwargs):
+        super().__init__(**kwargs)
+        self._partition = partition
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="gpu-modal"):
+            yield Static(f" GPU info · {self._partition} ", id="gpu-modal-title")
+            yield Static("Loading…", id="gpu-modal-hint")
+            yield RichLog(id="gpu-modal-log", highlight=False, markup=False)
+            yield Static("[ ESC or Q to close ]", id="gpu-modal-footer")
+
+    def on_mount(self) -> None:
+        self.run_worker(self._load, thread=True)
+
+    def _load(self) -> None:
+        output = fetch_gpu_gres(self._partition)
+        self.call_from_thread(self._display, output)
+
+    def _display(self, output: str) -> None:
+        try:
+            log = self.query_one("#gpu-modal-log", RichLog)
+            hint = self.query_one("#gpu-modal-hint", Static)
+            log.clear()
+            hint.update(f"sinfo -p {self._partition} --Format=nodelist,gres:50")
+            for line in output.splitlines():
+                log.write(Text.from_ansi(line))
+        except NoMatches:
+            pass
 
 # ─── Main App ─────────────────────────────────────────────────────────────────
 
