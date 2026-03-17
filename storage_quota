@@ -35,9 +35,10 @@ usage() {
 
   ${BOLD}DESCRIPTION${RESET}
       Reports storage usage for BMRC filesystems:
-        • Home directory  — du vs ${HOME_QUOTA_GiB} GiB policy limit  (may take a few seconds)
-        • Group space(s)  — /well/<group>  (auto-detected, GPFS or Lustre)
-        • Shared scratch  — /well/kir/scratch
+        • Home directory                         — du vs ${HOME_QUOTA_GiB} GiB policy limit  (may take a few seconds)
+        • Group space(s)                         — /well/<group>  (auto-detected, GPFS or Lustre)
+        • Shared scratch                         — /well/kir/scratch
+        • KIR projects (collab,datasets,mirror)  — /well/kir/scratch
 
   ${BOLD}OPTIONS${RESET}
       -h, --help           Show this help
@@ -224,7 +225,8 @@ main() {
     report_groups "$target_user"
     print_separator
     report_df "kir/scratch" "/well/kir/scratch" "GPFS  (shared — not per-user)"
-
+    printf "  ${BOLD}kir/projects/${RESET}\n"
+    report_df "  {collab,mirror...}" "/well/kir/projects" "GPFS (shared — not per-user)"
     printf "\n${DIM}  Colour guide: ${GREEN}█${RESET}${DIM} <70%%   ${YELLOW}█${RESET}${DIM} 70–89%%   ${RED}█${RESET}${DIM} ≥90%%"
     printf "   |   group & scratch figures are filesystem-wide${RESET}\n\n"
 }
