@@ -1,4 +1,4 @@
-<h2 align="center">hpc-utils ( `KIR-utils` module)</h2>
+<h2 align="center">hpc-utils ( <code>KIR-utils</code> module)</h2>
 
 <p align="center">
     <img src="./img/kir-utils_logo.png" alt="hpc-utils" width="350"/>
