@@ -1,7 +1,8 @@
 #!/bin/bash
+#
+# Author : Dini Senanayake - KIR RCM
 # KIR job profiler — must be sourced, not executed
 # Usage: source profile_job.sh
-#
 # Starts a background monitor that samples CPU and memory every 10 seconds.
 # Output: ${SLURM_JOB_ID}_monitor.csv in the current working directory.
 # Visualise with: uv run plot_monitor.py <jobid>_monitor.csv --cpus <n>
